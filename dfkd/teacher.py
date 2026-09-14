@@ -1,21 +1,18 @@
-"""Validation-only teacher selection with reproducible, bounded random search."""
+"""Single-run teacher training with validation-based checkpoint selection."""
 
 import copy
 import csv
-import itertools
 import json
 import math
-import random
 import shutil
 import time
 from pathlib import Path
 
 import torch
-import yaml
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset, Subset
 
-from dfkd.config import set_nested, validate
+from dfkd.config import validate
 from dfkd.data import normalize, real_dataset, test_loader
 from dfkd.metrics import ClassificationMetrics
 from dfkd.models import build_model, parameter_count
@@ -43,40 +40,6 @@ def stratified_split(targets, fraction, seed):
     return train, validation
 
 
-def trial_configs(prep, seed):
-    """Baseline first, then distinct grid points sampled without replacement."""
-    tuning = prep.get("tuning", {})
-    trials = tuning.get("trials", 1)
-    if not isinstance(trials, int) or isinstance(trials, bool) or trials < 1:
-        raise ValueError("tuning.trials must be a positive integer")
-    baseline = copy.deepcopy(prep)
-    baseline.pop("tuning", None)
-    if trials == 1:
-        return [baseline]
-    space = tuning.get("search_space", {})
-    allowed = {"optimizer.lr", "optimizer.weight_decay", "optimizer.momentum",
-               "batch_size", "label_smoothing"}
-    if not space or set(space) - allowed:
-        raise ValueError(f"Search space must use nonempty subsets of {sorted(allowed)}")
-    if any(not isinstance(v, list) or not v for v in space.values()):
-        raise ValueError("Search-space values must be nonempty lists")
-    size = math.prod(len(v) for v in space.values())
-    if size > 10000:
-        raise ValueError("Search grid is limited to 10000 combinations")
-    candidates, seen = [], {json.dumps(baseline, sort_keys=True)}
-    for values in itertools.product(*space.values()):
-        candidate = copy.deepcopy(baseline)
-        for key, value in zip(space, values):
-            set_nested(candidate, key, value)
-        signature = json.dumps(candidate, sort_keys=True)
-        if signature not in seen:
-            candidates.append(candidate)
-            seen.add(signature)
-    if trials > len(candidates) + 1:
-        raise ValueError("tuning.trials exceeds the number of distinct configurations")
-    return [baseline] + random.Random(seed).sample(candidates, trials - 1)
-
-
 class EarlyStopping:
     """Significant NLL improvement resets patience; raw best is saved separately."""
     def __init__(self, config):
@@ -100,7 +63,7 @@ class EarlyStopping:
         return self.patience > 0 and epoch >= self.min_epochs and self.bad_epochs >= self.patience
 
 
-def _validate_trial(prep):
+def _validate_training(prep):
     for key in ("epochs", "batch_size"):
         if not isinstance(prep[key], int) or prep[key] < (2 if key == "batch_size" else 1):
             raise ValueError(f"teacher_training.{key} is invalid")
@@ -141,8 +104,8 @@ class TrainingView(Dataset):
         return self.transform(image), label
 
 
-def _train_trial(c, prep, train_data, validation_data, testing_loader, device, directory, trial):
-    # Identical initialization and initial shuffle seed for fair comparisons.
+def _fit_teacher(c, prep, train_data, validation_data, testing_loader, device, directory):
+    # Reproducible initialization and data shuffling.
     seed = c["experiment"]["seed"]
     seed_all(seed)
     model = build_model(c["teacher"], c["dataset"]).to(device)
@@ -158,10 +121,6 @@ def _train_trial(c, prep, train_data, validation_data, testing_loader, device, d
     validation = DataLoader(validation_data, batch_size=c["evaluation"]["batch_size"])
     stopping = EarlyStopping(prep.get("early_stopping", {}))
     best_loss, best_epoch, best_state = math.inf, 0, None
-    directory.mkdir()
-    resolved = copy.deepcopy(c)
-    resolved["teacher_training"] = prep
-    (directory / "config.yaml").write_text(yaml.safe_dump(resolved, sort_keys=False))
     started = time.perf_counter()
     with (directory / "metrics.csv").open("w", newline="") as csv_file, (
         directory / "metrics.jsonl"
@@ -182,7 +141,7 @@ def _train_trial(c, prep, train_data, validation_data, testing_loader, device, d
                 loss = F.cross_entropy(logits, labels,
                                        label_smoothing=prep.get("label_smoothing", 0.0))
                 if not torch.isfinite(loss):
-                    raise FloatingPointError(f"Non-finite teacher loss in trial {trial}")
+                    raise FloatingPointError("Non-finite teacher loss")
                 loss.backward()
                 optimizer.step()
                 metrics.update(logits, labels)
@@ -198,7 +157,7 @@ def _train_trial(c, prep, train_data, validation_data, testing_loader, device, d
             with torch.random.fork_rng(devices=[device] if device.type == "cuda" else []):
                 tested = evaluate(model, testing_loader, c["dataset"], device)
             row = {
-                "trial": trial, "epoch": epoch, "batch_size": prep["batch_size"],
+                "epoch": epoch, "batch_size": prep["batch_size"],
                 "lr": optimizer.param_groups[0]["lr"],
                 "train_objective": objective_sum / training["samples"],
                 "train_seconds": train_seconds,
@@ -222,7 +181,7 @@ def _train_trial(c, prep, train_data, validation_data, testing_loader, device, d
             json_file.write(json.dumps(row, allow_nan=False) + "\n")
             json_file.flush()
             print(
-                f"Trial {trial} | Epoch {epoch}/{prep['epochs']} | "
+                f"Epoch {epoch}/{prep['epochs']} | "
                 f"train_loss={training['loss']:.4f} train_acc={training['accuracy']:.2f}% | "
                 f"val_loss={measured['loss']:.4f} val_acc={measured['accuracy']:.2f}% | "
                 f"test_loss={tested['loss']:.4f} test_acc={tested['accuracy']:.2f}%",
@@ -230,9 +189,8 @@ def _train_trial(c, prep, train_data, validation_data, testing_loader, device, d
             )
             if stopped:
                 break
-    summary = dict(trial=trial, best_epoch=best_epoch, best_val_loss=best_loss,
+    summary = dict(best_epoch=best_epoch, best_val_loss=best_loss,
                    epochs_run=epoch, early_stopped=stopped, teacher_training=prep)
-    (directory / "results.json").write_text(json.dumps(summary, indent=2, allow_nan=False))
     return summary, best_state
 
 
@@ -241,9 +199,9 @@ def train_teacher(config):
     c = validate(copy.deepcopy(config))
     prep = c["teacher_training"]
     seed = c["experiment"]["seed"]
-    trials = trial_configs(prep, seed)
-    for trial in trials:
-        _validate_trial(trial)
+    # Ignore obsolete search settings in older configuration files.
+    prep.pop("tuning", None)
+    _validate_training(prep)
     device = get_device(c)
     data = real_dataset(c, "train", purpose="teacher_training")
     train_indices, validation_indices = stratified_split(
@@ -256,17 +214,11 @@ def train_teacher(config):
     train_data = TrainingView(Subset(data, train_indices), c)
     validation_data = Subset(data, validation_indices)
     testing_loader = test_loader(c)
-    summaries, winner = [], None
-    for number, trial in enumerate(trials, 1):
-        summary, state = _train_trial(
-            c, trial, train_data, validation_data, testing_loader, device, run / f"trial_{number:03d}", number
-        )
-        summaries.append(summary)
-        if winner is None or summary["best_val_loss"] < winner["best_val_loss"]:
-            winner = summary
-            torch.save(state, run / "best.pt")
-        del state
-        (run / "trials.json").write_text(json.dumps(summaries, indent=2, allow_nan=False))
+    summary, state = _fit_teacher(
+        c, prep, train_data, validation_data, testing_loader, device, run
+    )
+    torch.save(state, run / "best.pt")
+    del state
     model = build_model(c["teacher"], c["dataset"]).to(device)
     model.load_state_dict(torch.load(run / "best.pt", map_location="cpu", weights_only=True))
     # Re-evaluate the validation-selected checkpoint for the final report.
@@ -274,14 +226,9 @@ def train_teacher(config):
     output = Path(c["teacher"]["checkpoint"])
     output.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(run / "best.pt", output)
-    selected = copy.deepcopy(c)
-    selected["teacher_training"] = copy.deepcopy(winner["teacher_training"])
-    selected["teacher_training"]["tuning"] = {"trials": 1}
-    (run / "best_config.yaml").write_text(yaml.safe_dump(selected, sort_keys=False))
     results = dict(
-        selection_metric="validation cross-entropy (NLL)", best_trial=winner["trial"],
-        best_epoch=winner["best_epoch"], best_val_loss=winner["best_val_loss"],
-        trials=len(trials), seed=seed, train_samples=len(train_indices),
+        selection_metric="validation cross-entropy (NLL)",
+        **summary, seed=seed, train_samples=len(train_indices),
         validation_samples=len(validation_indices), test=testing,
         teacher_parameters=parameter_count(model), checkpoint=str(output),
     )

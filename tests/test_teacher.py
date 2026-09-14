@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from dfkd.config import load
 from dfkd.metrics import ClassificationMetrics
-from dfkd.teacher import EarlyStopping, stratified_split, train_teacher, trial_configs
+from dfkd.teacher import EarlyStopping, stratified_split, train_teacher
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -65,19 +65,6 @@ def test_early_stopping_burn_in_delta_and_disabled():
         disabled.step(float("nan"), 10)
 
 
-def test_trials_are_unique_seeded_and_include_baseline():
-    prep = load(ROOT / "configs/cifar10.yaml")["teacher_training"]
-    trials = trial_configs(prep, 42)
-    assert len(trials) == 8
-    assert len({json.dumps(t, sort_keys=True) for t in trials}) == 8
-    assert trials[0]["optimizer"] == prep["optimizer"]
-    assert trials == trial_configs(prep, 42)
-    assert trials != trial_configs(prep, 43)
-    prep["tuning"]["trials"] = 100
-    with pytest.raises(ValueError, match="distinct"):
-        trial_configs(prep, 42)
-
-
 def test_teacher_selection_uses_validation_despite_test_reporting(tmp_path, monkeypatch, capsys):
     import dfkd.teacher as module
 
@@ -90,7 +77,6 @@ def test_teacher_selection_uses_validation_despite_test_reporting(tmp_path, monk
         epochs=4, batch_size=8, validation_fraction=0.25,
         augmentation={"enabled": False},
         early_stopping={"patience": 1, "min_epochs": 1, "min_delta": 0.0},
-        tuning={"trials": 2, "search_space": {"optimizer.lr": [0.01, 0.1]}},
     )
     data = TensorDataset(torch.rand(40, 1, 28, 28), torch.arange(40) % 10)
     data.targets = torch.arange(40) % 10
@@ -100,9 +86,9 @@ def test_teacher_selection_uses_validation_despite_test_reporting(tmp_path, monk
                                                        torch.nn.Linear(784, 10)))
     seen, states = [], []
     actual_evaluate = module.evaluate
-    losses = iter([0.3, 0.4, 0.2, 0.4])
+    losses = iter([0.3, 0.4])
     test_data = DataLoader(data, batch_size=8)
-    test_losses = iter([0.9, 0.1, 0.8, 0.05, 0.8])
+    test_losses = iter([0.9, 0.1, 0.9])
 
     def testing(config):
         assert seen == []
@@ -113,7 +99,7 @@ def test_teacher_selection_uses_validation_despite_test_reporting(tmp_path, monk
         result = actual_evaluate(model, loader, *args, **kwargs)
         if loader is test_data:
             seen.append("test_evaluated")
-            # Test prefers later epochs; validation must still choose trial 2, epoch 1.
+            # Test prefers later epochs; validation must still choose epoch 1.
             result["loss"] = next(test_losses)
         else:
             seen.append("validation")
@@ -124,29 +110,28 @@ def test_teacher_selection_uses_validation_despite_test_reporting(tmp_path, monk
     monkeypatch.setattr(module, "test_loader", testing)
     monkeypatch.setattr(module, "evaluate", evaluate)
     output = train_teacher(c)
-    assert seen == ["test_loaded"] + ["validation", "test_evaluated"] * 4 + ["test_evaluated"]
+    assert seen == ["test_loaded"] + ["validation", "test_evaluated"] * 2 + ["test_evaluated"]
     console = capsys.readouterr().out
-    epoch_lines = [line for line in console.splitlines() if line.startswith("Trial ")]
-    assert len(epoch_lines) == 4
+    epoch_lines = [line for line in console.splitlines() if line.startswith("Epoch ")]
+    assert len(epoch_lines) == 2
     assert all("train_loss=" in line and "val_loss=" in line and "test_loss=" in line
                and "test_acc=" in line for line in epoch_lines)
     saved = torch.load(output, weights_only=True)
-    assert all(torch.equal(saved[key], states[2][key]) for key in saved)
+    assert all(torch.equal(saved[key], states[0][key]) for key in saved)
     run = next((tmp_path / "runs").iterdir())
     result = json.loads((run / "results.json").read_text())
-    assert result["best_trial"] == 2 and result["best_epoch"] == 1
-    assert result["best_val_loss"] == 0.2
-    for trial in (1, 2):
-        directory = run / f"trial_{trial:03d}"
-        with (directory / "metrics.csv").open() as f:
-            rows = list(csv.DictReader(f))
-        assert len(rows) == 2
-        assert "val_ece" in rows[0] and "train_samples_per_second" in rows[0]
-        assert "test_loss" in rows[0] and "test_accuracy" in rows[0]
-        assert rows[-1]["early_stopped"] == "True"
-        details = [json.loads(line) for line in (directory / "metrics.jsonl").read_text().splitlines()]
-        assert len(details[0]["val_confusion_matrix"]) == 10
-        assert not list(directory.glob("*.pt"))
+    assert result["best_epoch"] == 1
+    assert result["best_val_loss"] == 0.3
+    with (run / "metrics.csv").open() as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 2
+    assert "val_ece" in rows[0] and "train_samples_per_second" in rows[0]
+    assert "test_loss" in rows[0] and "test_accuracy" in rows[0]
+    assert rows[-1]["early_stopped"] == "True"
+    details = [json.loads(line) for line in (run / "metrics.jsonl").read_text().splitlines()]
+    assert len(details[0]["val_confusion_matrix"]) == 10
+    assert (run / "best.pt").is_file()
+    assert not any(path.is_dir() for path in run.iterdir())
 
 
 def test_teacher_epochs_cli_override():

@@ -95,9 +95,3 @@ teacher_training:
     patience: 20         # 0 disables stopping; best checkpoint still selected
     min_epochs: 60       # patience starts counting here, allowing LR decay
     min_delta: 0.0001    # validation NLL; independent of raw best checkpoint
-  tuning:
-    trials: 8           # includes baseline; set to 1 for a single training run
-    search_space:
-      optimizer.lr: [0.01, 0.05, 0.1]
-      optimizer.weight_decay: [0.0001, 0.0005, 0.001]
-      label_smoothing: [0.0, 0.1]

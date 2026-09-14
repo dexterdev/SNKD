@@ -34,56 +34,47 @@ dfkd distill --config configs/cifar10.yaml --temperature 4 --epochs 50 \
 Each distillation writes `runs/<name>_<timestamp>/` containing the resolved
 `config.yaml`, `metrics.csv`, `results.json`, and `best.pt` / `last.pt`.
 
-## Teacher training and tuning
+## Teacher training
 
-`dfkd train_teacher` runs **8 configurations**, including the configured baseline,
-with at most 100 epochs each by default. Budget for up to 800 training epochs;
-early stopping can reduce this. The reproducible random search samples distinct
-combinations of learning rate, weight decay and label smoothing without replacement.
-It uses the existing optimizer family. Edit `teacher_training.tuning.search_space`
-for the architecture; these are starting ranges, not claimed optimal settings.
+`dfkd train_teacher` performs one training run using the configured hyperparameters,
+with at most 100 epochs by default. Set learning rate, weight decay, and label
+smoothing directly under `teacher_training`.
 
 ```bash
-# Reproducible search, one fixed 90/10 stratified training/validation split
 dfkd train_teacher --config configs/cifar10.yaml
-
-# Single configuration, or a smaller search budget
-dfkd train_teacher --config configs/mnist.yaml --set teacher_training.tuning.trials=1
-dfkd train_teacher --config configs/cifar10.yaml --set teacher_training.tuning.trials=3
-
-# --epochs now targets teacher epochs for train_teacher
-dfkd train_teacher --config configs/cifar10.yaml --epochs 200
+dfkd train_teacher --config configs/cifar10.yaml --epochs 200 \
+  --set teacher_training.optimizer.lr=0.05
 ```
 
-All trials use the same split, initialization seed and initial shuffle seed. Mild
+Training uses a seeded 90/10 stratified training/validation split. Mild
 training-only augmentation uses crop padding 4 on CIFAR and horizontal flips except
 on MNIST. Set `teacher_training.augmentation.enabled=false` to disable it.
 Validation is unaugmented. Split indices are saved relative to the original training
 dataset. Seeded runs are reproducible on a fixed setup; CUDA kernels may still be
 nondeterministic.
 
-Checkpoint and trial selection minimize **validation cross-entropy (NLL)**.
+Checkpoint selection minimizes **validation cross-entropy (NLL)**.
 Early stopping uses that same metric, with patience 20 and minimum improvement
 0.0001; patience starts counting from epoch 60 to allow learning-rate decay.
 Set `teacher_training.early_stopping.patience=0` to disable stopping. Increase
 `min_epochs` when increasing the training budget or using a late LR drop.
 The raw best checkpoint is saved even for improvements smaller than `min_delta`.
 The official test set is evaluated each epoch for reporting only. Test metrics do
-not control checkpoint selection, trial ranking, or early stopping. The selected
+not control checkpoint selection or early stopping. The selected
 checkpoint is evaluated again for the final test report.
 No full-training-set refit is performed: the exported model is the validation winner.
 
 Each teacher run writes:
 
-- `config.yaml`, `split.pt`, `trials.json`, `best_config.yaml`, and `results.json`.
-- Per-trial resolved configs and summaries, plus flushed `metrics.csv` (scalars)
+- `config.yaml`, `split.pt`, and `results.json`.
+- Flushed `metrics.csv` (scalars)
   and `metrics.jsonl` (including per-class metrics and confusion matrices).
-- One `best.pt` for the winning trial, exported as the plain state dict at
+- One `best.pt` for the best validation epoch, exported as the plain state dict at
   `teacher.checkpoint`, compatible with student distillation. An existing export
   is replaced after successful training; the timestamped run keeps its own copy.
 
 Console output is limited to train/validation/test loss and accuracy each epoch,
-with trial and epoch identifiers. The final line reports the selected teacher\'s
+with the epoch number. The final line reports the selected teacher's
 test loss and accuracy.
 
 Every epoch saves train/validation/test NLL, accuracy, top-5 accuracy, macro precision,
@@ -101,8 +92,7 @@ Training metrics describe the augmented minibatches seen during optimization;
 `train_objective` includes label smoothing while `train_loss` is ordinary NLL.
 Evaluation metrics describe a fixed checkpoint on unaugmented data.
 
-No tuning framework or metrics dependency is added. Trial weights are not archived,
-and metrics stream to disk rather than retaining predictions or epoch history.
+Metrics stream to disk rather than retaining predictions or epoch history.
 
 ## How it works
 
