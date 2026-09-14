@@ -68,7 +68,9 @@ Early stopping uses that same metric, with patience 20 and minimum improvement
 Set `teacher_training.early_stopping.patience=0` to disable stopping. Increase
 `min_epochs` when increasing the training budget or using a late LR drop.
 The raw best checkpoint is saved even for improvements smaller than `min_delta`.
-The official test set is evaluated **once, after all selection is complete**.
+The official test set is evaluated each epoch for reporting only. Test metrics do
+not control checkpoint selection, trial ranking, or early stopping. The selected
+checkpoint is evaluated again for the final test report.
 No full-training-set refit is performed: the exported model is the validation winner.
 
 Each teacher run writes:
@@ -80,10 +82,11 @@ Each teacher run writes:
   `teacher.checkpoint`, compatible with student distillation. An existing export
   is replaced after successful training; the timestamped run keeps its own copy.
 
-Console output is limited to train/validation loss and accuracy each epoch, with
-trial and epoch identifiers. Test loss and accuracy print once after model selection.
+Console output is limited to train/validation/test loss and accuracy each epoch,
+with trial and epoch identifiers. The final line reports the selected teacher\'s
+test loss and accuracy.
 
-Every epoch saves train/validation NLL, accuracy, top-5 accuracy, macro precision,
+Every epoch saves train/validation/test NLL, accuracy, top-5 accuracy, macro precision,
 recall and F1, weighted F1, balanced accuracy, 15-bin ECE, multiclass Brier score,
 mean confidence, sample counts, training objective, LR, batch size, timing,
 throughput, peak allocated CUDA memory, best epoch and stopping status.
