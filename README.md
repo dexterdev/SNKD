@@ -80,7 +80,10 @@ Each teacher run writes:
   `teacher.checkpoint`, compatible with student distillation. An existing export
   is replaced after successful training; the timestamped run keeps its own copy.
 
-Every epoch prints train/validation NLL, accuracy, top-5 accuracy, macro precision,
+Console output is limited to train/validation loss and accuracy each epoch, with
+trial and epoch identifiers. Test loss and accuracy print once after model selection.
+
+Every epoch saves train/validation NLL, accuracy, top-5 accuracy, macro precision,
 recall and F1, weighted F1, balanced accuracy, 15-bin ECE, multiclass Brier score,
 mean confidence, sample counts, training objective, LR, batch size, timing,
 throughput, peak allocated CUDA memory, best epoch and stopping status.
