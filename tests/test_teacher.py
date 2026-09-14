@@ -78,7 +78,7 @@ def test_trials_are_unique_seeded_and_include_baseline():
         trial_configs(prep, 42)
 
 
-def test_teacher_selects_best_epoch_without_test_leakage(tmp_path, monkeypatch):
+def test_teacher_selection_uses_validation_despite_test_reporting(tmp_path, monkeypatch, capsys):
     import dfkd.teacher as module
 
     torch.set_num_threads(1)
@@ -102,9 +102,10 @@ def test_teacher_selects_best_epoch_without_test_leakage(tmp_path, monkeypatch):
     actual_evaluate = module.evaluate
     losses = iter([0.3, 0.4, 0.2, 0.4])
     test_data = DataLoader(data, batch_size=8)
+    test_losses = iter([0.9, 0.1, 0.8, 0.05, 0.8])
 
     def testing(config):
-        assert seen == ["validation"] * 4
+        assert seen == []
         seen.append("test_loaded")
         return test_data
 
@@ -112,6 +113,8 @@ def test_teacher_selects_best_epoch_without_test_leakage(tmp_path, monkeypatch):
         result = actual_evaluate(model, loader, *args, **kwargs)
         if loader is test_data:
             seen.append("test_evaluated")
+            # Test prefers later epochs; validation must still choose trial 2, epoch 1.
+            result["loss"] = next(test_losses)
         else:
             seen.append("validation")
             result["loss"] = next(losses)
@@ -121,7 +124,12 @@ def test_teacher_selects_best_epoch_without_test_leakage(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "test_loader", testing)
     monkeypatch.setattr(module, "evaluate", evaluate)
     output = train_teacher(c)
-    assert seen == ["validation"] * 4 + ["test_loaded", "test_evaluated"]
+    assert seen == ["test_loaded"] + ["validation", "test_evaluated"] * 4 + ["test_evaluated"]
+    console = capsys.readouterr().out
+    epoch_lines = [line for line in console.splitlines() if line.startswith("Trial ")]
+    assert len(epoch_lines) == 4
+    assert all("train_loss=" in line and "val_loss=" in line and "test_loss=" in line
+               and "test_acc=" in line for line in epoch_lines)
     saved = torch.load(output, weights_only=True)
     assert all(torch.equal(saved[key], states[2][key]) for key in saved)
     run = next((tmp_path / "runs").iterdir())
@@ -134,6 +142,7 @@ def test_teacher_selects_best_epoch_without_test_leakage(tmp_path, monkeypatch):
             rows = list(csv.DictReader(f))
         assert len(rows) == 2
         assert "val_ece" in rows[0] and "train_samples_per_second" in rows[0]
+        assert "test_loss" in rows[0] and "test_accuracy" in rows[0]
         assert rows[-1]["early_stopped"] == "True"
         details = [json.loads(line) for line in (directory / "metrics.jsonl").read_text().splitlines()]
         assert len(details[0]["val_confusion_matrix"]) == 10
