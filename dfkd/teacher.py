@@ -218,7 +218,12 @@ def _train_trial(c, prep, train_data, validation_data, device, directory, trial)
             csv_file.flush()
             json_file.write(json.dumps(row, allow_nan=False) + "\n")
             json_file.flush()
-            print(json.dumps(scalars, allow_nan=False), flush=True)
+            print(
+                f"Trial {trial} | Epoch {epoch}/{prep['epochs']} | "
+                f"train_loss={training['loss']:.4f} train_acc={training['accuracy']:.2f}% | "
+                f"val_loss={measured['loss']:.4f} val_acc={measured['accuracy']:.2f}%",
+                flush=True,
+            )
             if stopped:
                 break
     summary = dict(trial=trial, best_epoch=best_epoch, best_val_loss=best_loss,
@@ -276,5 +281,8 @@ def train_teacher(config):
         teacher_parameters=parameter_count(model), checkpoint=str(output),
     )
     (run / "results.json").write_text(json.dumps(results, indent=2, allow_nan=False))
-    print(json.dumps({"teacher_run": str(run), **results}, allow_nan=False), flush=True)
+    print(
+        f"Test | loss={testing['loss']:.4f} accuracy={testing['accuracy']:.2f}%",
+        flush=True,
+    )
     return output
