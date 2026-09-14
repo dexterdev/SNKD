@@ -15,29 +15,39 @@ synthetic_data:
   num_samples: 200000
   priors:
     linear_gradient: {weight: 1.0}
-    perlin: {weight: 1.0}
+    perlin: {weight: 1.0, params: {resolutions: [2, 4, 8]}}
     uniform: {weight: 1.0}
-    gabor: {weight: 1.0}
-    checkerboard: {weight: 1.0}
-    gaussian: {weight: 1.0}
+    gabor: {weight: 1.0, params: {frequency: [1.0, 8.0], sigma: [0.15, 0.8]}}
+    checkerboard: {weight: 1.0, params: {block_sizes: [2, 4, 8, 16]}}
+    gaussian: {weight: 1.0, params: {mean: 0.5, std: 0.2}}
 
+# Stage 1: two geometric transforms, always applied, in order.
+# Stage 2: num_random_ops of the 17 operations below, drawn without replacement.
 augmentation:
   enabled: true
-  crop_padding: 4
-  horizontal_flip: true
+  geometric:
+    crop: {padding: 4, padding_mode: reflect}
+    horizontal_flip: true
   num_random_ops: 3
+  without_replacement: true
   operations:
     rotation: {degrees: 20}
     affine: {degrees: 15, translate: [0.1, 0.1], scale: [0.9, 1.1], shear: 10}
     perspective: {distortion_scale: 0.25, p: 1.0}
     random_resized_crop: {scale: [0.6, 1.0], ratio: [0.8, 1.25]}
     color_jitter: {brightness: 0.3, contrast: 0.3}
+    grayscale: {p: 1.0}
     gaussian_blur: {kernel_size: 3, sigma: [0.1, 1.5]}
     sharpness: {sharpness_factor: 2.0, p: 1.0}
     autocontrast: {p: 1.0}
+    histogram_equalization: {p: 1.0}
+    posterization: {bits: 4, p: 1.0}
+    solarization: {threshold: 0.5, p: 1.0}
     inversion: {p: 1.0}
     gaussian_noise: {std: 0.05}
-    cutout: {fraction: 0.25}
+    salt_and_pepper_noise: {probability: 0.03}
+    cutout: {fraction: 0.25, fill: 0.0}
+    random_color_region_erasing: {fraction: 0.25}
 
 distillation:
   loss: kl_divergence
@@ -49,9 +59,16 @@ optimizer:
   momentum: 0.9
   weight_decay: 0.0005
 
+# The LR curve restarts within each batch-size phase, so every batch-size
+# regime trains under a full decay rather than a near-zero tail.
+scheduler:
+  name: cosine
+  phase_resets: true
+  min_lr_ratio: 0.0
+
 training:
   epochs: 200
-  batch_size: 256
+  batch_size_schedule: [16, 32, 64, 128, 256, 512, 1024, 2048]
   device: auto
 
 evaluation:
@@ -66,3 +83,6 @@ teacher_training:
     lr: 0.1
     momentum: 0.9
     weight_decay: 0.0005
+  scheduler:
+    name: cosine
+    phase_resets: false

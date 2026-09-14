@@ -39,6 +39,7 @@ def validate(c):
     from dfkd.augment import Augment
     from dfkd.data import DATASETS
     from dfkd.models import MODELS
+    from dfkd.schedule import CURVES
     from dfkd.synthetic import SyntheticDataset
 
     d = c["dataset"]
@@ -55,8 +56,23 @@ def validate(c):
         MODELS.resolve(c[role]["architecture"])
     if c["distillation"]["temperature"] <= 0:
         raise ValueError("distillation.temperature must be positive")
-    if c["training"]["batch_size"] < 1 or c["training"]["epochs"] < 1:
-        raise ValueError("training.batch_size and training.epochs must be positive")
+    t = c["training"]
+    schedule = t["batch_size_schedule"]
+    if not schedule or min(schedule) < 1:
+        raise ValueError("training.batch_size_schedule needs at least one positive batch size")
+    if t["epochs"] < len(schedule):
+        raise ValueError("training.epochs must give every batch-size phase at least one epoch")
+    samples = c["synthetic_data"]["num_samples"]
+    if any(min(samples, b) < 2 or samples % b == 1 for b in schedule):
+        # A singleton final minibatch makes BatchNorm fail in training mode.
+        raise ValueError(
+            "batch_size_schedule leaves a single-sample final minibatch; "
+            "adjust synthetic_data.num_samples or the schedule"
+        )
+    for spec in (c["scheduler"], c["teacher_training"]["scheduler"]):
+        CURVES.resolve(spec["name"])
+        if not 0 <= spec.get("min_lr_ratio", 0) <= 1:
+            raise ValueError("scheduler.min_lr_ratio must be in [0, 1]")
     Augment(c["augmentation"], d)
     SyntheticDataset(c)
     return c

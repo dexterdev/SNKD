@@ -16,6 +16,7 @@ from dfkd.config import validate
 from dfkd.data import normalize, real_dataset, test_loader
 from dfkd.distill import kl, objective
 from dfkd.models import build_model, freeze, parameter_count
+from dfkd.schedule import Schedule
 from dfkd.synthetic import SyntheticDataset
 
 
@@ -76,7 +77,11 @@ def train_teacher(config):
     prep = c["teacher_training"]
     model = build_model(c["teacher"], c["dataset"]).to(device)
     optimizer = make_optimizer(model, prep["optimizer"])
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, prep["epochs"])
+    scheduler = Schedule(
+        optimizer,
+        prep["scheduler"],
+        dict(epochs=prep["epochs"], batch_size_schedule=[prep["batch_size"]]),
+    )
     loader = DataLoader(
         real_dataset(c, "train", purpose="teacher_training"),
         batch_size=prep["batch_size"],
@@ -85,6 +90,7 @@ def train_teacher(config):
     testing = test_loader(c)
     output = Path(c["teacher"]["checkpoint"])
     for epoch in range(prep["epochs"]):
+        scheduler.step(epoch)
         model.train()
         total = seen = 0
         for x, y in loader:
@@ -96,7 +102,6 @@ def train_teacher(config):
             optimizer.step()
             total += loss.item() * len(y)
             seen += len(y)
-        scheduler.step()
         accuracy = evaluate(model, testing, c["dataset"], device)["accuracy"]
         output.parent.mkdir(parents=True, exist_ok=True)
         torch.save(model.state_dict(), output)
@@ -122,7 +127,7 @@ def train_student(config, *, evaluation_loader=None):
     teacher = load_teacher(c, device)
     student = build_model(c["student"], d).to(device)
     optimizer = make_optimizer(student, c["optimizer"])
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, t["epochs"])
+    scheduler = Schedule(optimizer, c["scheduler"], t)
     data = SyntheticDataset(c)
     augment = Augment(c["augmentation"], d)
     evaluator = evaluation_loader if evaluation_loader is not None else test_loader(c)
@@ -137,7 +142,8 @@ def train_student(config, *, evaluation_loader=None):
     queries = 0
     best = -1.0
     for epoch in range(t["epochs"]):
-        loader = DataLoader(data, batch_size=t["batch_size"], shuffle=True)
+        phase, batch_size = scheduler.step(epoch)
+        loader = DataLoader(data, batch_size=batch_size, shuffle=True)
         student.train()
         total = seen = 0
         for batch in loader:
@@ -153,7 +159,6 @@ def train_student(config, *, evaluation_loader=None):
             optimizer.step()
             total += loss.item() * len(x)
             seen += len(x)
-        scheduler.step()
         measured = (epoch + 1) % c["evaluation"]["every"] == 0 or epoch + 1 == t["epochs"]
         accuracy = (
             evaluate(student, evaluator, d, device)["accuracy"] if measured else None
@@ -164,6 +169,8 @@ def train_student(config, *, evaluation_loader=None):
         history.append(
             dict(
                 epoch=epoch + 1,
+                phase=phase,
+                batch_size=batch_size,
                 lr=optimizer.param_groups[0]["lr"],
                 train_loss=total / seen,
                 student_accuracy=accuracy,
@@ -195,6 +202,8 @@ def train_student(config, *, evaluation_loader=None):
         accuracy_retention_percent=retention,
         teacher_queries=queries,
         final_train_loss=history[-1]["train_loss"],
+        batch_size_schedule=t["batch_size_schedule"],
+        lr_schedule=c["scheduler"],
     )
     (run / "results.json").write_text(json.dumps(results, indent=2))
     return run

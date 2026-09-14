@@ -1,0 +1,21 @@
+extends: base.yaml
+experiment:
+  name: lenet_fashionmnist
+dataset:
+  name: fashionmnist
+  channels: 1
+  image_size: 28
+  num_classes: 10
+  normalization:
+    mean: [0.286]
+    std: [0.353]
+  data_root: data
+teacher:
+  architecture: lenet5
+  checkpoint: checkpoints/lenet5_fashionmnist.pt
+student:
+  architecture: lenet5_half
+augmentation:
+  geometric:
+    # Garments are mirror-symmetric in class, so the flip stays on.
+    horizontal_flip: true

@@ -16,4 +16,6 @@ teacher:
 student:
   architecture: lenet5_half
 augmentation:
-  horizontal_flip: false
+  geometric:
+    # A mirrored digit is a different digit: MNIST runs crop only.
+    horizontal_flip: false

@@ -1,3 +1,4 @@
+import csv
 import json
 from pathlib import Path
 
@@ -5,10 +6,11 @@ import pytest
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
-from dfkd.augment import Augment
+from dfkd.augment import OPERATIONS, Augment
 from dfkd.config import load, validate
 from dfkd.data import real_dataset
 from dfkd.models import build_model, parameter_count
+from dfkd.schedule import Schedule, phase_at
 from dfkd.synthetic import PRIORS, SyntheticDataset
 from dfkd.train import train_student
 
@@ -22,7 +24,7 @@ def config(tmp_path):
     c["experiment"]["output_dir"] = str(tmp_path / "runs")
     c["teacher"]["checkpoint"] = str(tmp_path / "teacher.pt")
     c["synthetic_data"]["num_samples"] = 8
-    c["training"].update(epochs=2, batch_size=4, device="cpu")
+    c["training"].update(epochs=2, batch_size_schedule=[4], device="cpu")
     c["evaluation"]["batch_size"] = 4
     c["augmentation"]["num_random_ops"] = 2
     return validate(c)
@@ -113,3 +115,107 @@ def test_distillation_end_to_end(config, teacher_checkpoint, heldout, monkeypatc
     assert results["teacher_parameters"] == 61706
     assert results["teacher_queries"] == 16  # 8 samples x 2 epochs
     assert results["final_student_accuracy"] is not None
+
+
+def test_randaug_pool_has_seventeen_operations():
+    assert len(OPERATIONS) == 17
+
+
+@pytest.mark.parametrize("k", [0, 1, 3, 17])
+def test_augmentation_applies_n_of_seventeen_without_replacement(config, k, monkeypatch):
+    config["augmentation"]["num_random_ops"] = k
+    augment = Augment(config["augmentation"], config["dataset"])
+    assert len(augment.operations) == 17
+    drawn = []
+    for index, name in enumerate(augment.names):
+        augment.operations[index] = lambda x, name=name: (drawn.append(name), x)[1]
+    augment(SyntheticDataset(config)[0]["image"])
+    assert len(drawn) == k
+    assert len(set(drawn)) == k  # 17-choose-k: no operation is drawn twice.
+
+
+def test_num_random_ops_cannot_exceed_the_pool(config):
+    config["augmentation"]["num_random_ops"] = 18
+    with pytest.raises(ValueError, match="cannot exceed"):
+        Augment(config["augmentation"], config["dataset"])
+
+
+def test_geometric_stage_runs_before_the_random_ops(config):
+    order = []
+    augment = Augment(config["augmentation"], config["dataset"])
+    augment.geometric = [lambda x: (order.append("geometric"), x)[1]]
+    for index in range(len(augment.operations)):
+        augment.operations[index] = lambda x: (order.append("randaug"), x)[1]
+    augment(SyntheticDataset(config)[0]["image"])
+    assert order[0] == "geometric"
+    assert order.count("geometric") == 1
+    assert order[1:] == ["randaug"] * config["augmentation"]["num_random_ops"]
+
+
+@pytest.mark.parametrize(
+    "name,flip", [("mnist", False), ("fashionmnist", True), ("cifar10", True)]
+)
+def test_flip_is_configured_per_dataset(name, flip):
+    c = load(ROOT / f"configs/{name}.yaml")
+    assert c["augmentation"]["geometric"]["horizontal_flip"] is flip
+    augment = Augment(c["augmentation"], c["dataset"])
+    # Stage 1 is crop plus, where enabled, the flip: two geometric transforms.
+    assert len(augment.geometric) == (2 if flip else 1)
+
+
+def test_fashionmnist_config_uses_the_lenet_pair():
+    c = validate(load(ROOT / "configs/fashionmnist.yaml"))
+    assert c["dataset"]["name"] == "fashionmnist"
+    assert (c["teacher"]["architecture"], c["student"]["architecture"]) == (
+        "lenet5",
+        "lenet5_half",
+    )
+
+
+def test_batch_size_phases_partition_the_epochs():
+    sizes = [16, 32, 64, 128, 256, 512, 1024, 2048]
+    assert phase_at(0, 200, sizes) == (0, 0, 25, 16)
+    assert phase_at(24, 200, sizes) == (0, 0, 25, 16)
+    assert phase_at(25, 200, sizes) == (1, 25, 25, 32)
+    assert phase_at(199, 200, sizes) == (7, 175, 25, 2048)
+    with pytest.raises(ValueError, match="outside"):
+        phase_at(200, 200, sizes)
+    # Earlier phases absorb the remainder when epochs do not divide evenly.
+    assert [phase_at(e, 5, [8, 16])[3] for e in range(5)] == [8, 8, 8, 16, 16]
+
+
+def test_lr_restarts_inside_each_batch_size_phase():
+    model = torch.nn.Linear(1, 1)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    training = dict(epochs=4, batch_size_schedule=[2, 4])
+    schedule = Schedule(optimizer, {"name": "cosine", "phase_resets": True}, training)
+    seen = [(schedule.step(e), optimizer.param_groups[0]["lr"]) for e in range(4)]
+    assert [batch for (_, batch), _ in seen] == [2, 2, 4, 4]
+    assert [lr for _, lr in seen] == [0.1, 0.0, 0.1, 0.0]  # Cosine restarts at the boundary.
+
+
+def test_lr_decays_once_across_training_without_phase_resets():
+    model = torch.nn.Linear(1, 1)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    training = dict(epochs=4, batch_size_schedule=[2, 4])
+    schedule = Schedule(optimizer, {"name": "cosine", "phase_resets": False}, training)
+    rates = [(schedule.step(e), optimizer.param_groups[0]["lr"])[1] for e in range(4)]
+    assert rates == sorted(rates, reverse=True)
+    assert rates[0] == 0.1 and rates[-1] == 0.0
+
+
+def test_singleton_final_minibatch_is_rejected(config):
+    config["synthetic_data"]["num_samples"] = 9
+    config["training"]["batch_size_schedule"] = [4]
+    with pytest.raises(ValueError, match="single-sample"):
+        validate(config)
+
+
+def test_distillation_steps_the_batch_size(config, teacher_checkpoint, heldout):
+    config["training"].update(epochs=2, batch_size_schedule=[4, 8])
+    run = train_student(config, evaluation_loader=heldout)
+    rows = list(csv.DictReader((run / "metrics.csv").open()))
+    assert [int(r["batch_size"]) for r in rows] == [4, 8]
+    assert [int(r["phase"]) for r in rows] == [0, 1]
+    results = json.loads((run / "results.json").read_text())
+    assert results["batch_size_schedule"] == [4, 8]
