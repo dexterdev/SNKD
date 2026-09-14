@@ -1,0 +1,19 @@
+extends: base.yaml
+experiment:
+  name: lenet_mnist
+dataset:
+  name: mnist
+  channels: 1
+  image_size: 28
+  num_classes: 10
+  normalization:
+    mean: [0.1307]
+    std: [0.3081]
+  data_root: data
+teacher:
+  architecture: lenet5
+  checkpoint: checkpoints/lenet5_mnist.pt
+student:
+  architecture: lenet5_half
+augmentation:
+  horizontal_flip: false

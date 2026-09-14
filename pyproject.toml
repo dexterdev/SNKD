@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dfkd"
+version = "0.1.0"
+description = "Generator-free data-free knowledge distillation from random synthetic priors"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.3", "torchvision>=0.18", "PyYAML>=6"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+dfkd = "dfkd.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["dfkd*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

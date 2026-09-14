@@ -1,0 +1,17 @@
+extends: base.yaml
+experiment:
+  name: resnet_cifar10
+dataset:
+  name: cifar10
+  channels: 3
+  image_size: 32
+  num_classes: 10
+  normalization:
+    mean: [0.4914, 0.4822, 0.4465]
+    std: [0.247, 0.2435, 0.2616]
+  data_root: data
+teacher:
+  architecture: resnet34
+  checkpoint: checkpoints/resnet34_cifar10.pt
+student:
+  architecture: resnet18
