@@ -17,7 +17,7 @@ def resolve(args):
         ("temperature", "distillation.temperature"),
         ("seed", "experiment.seed"),
         ("num_samples", "synthetic_data.num_samples"),
-        ("epochs", "training.epochs"),
+        ("epochs", "teacher_training.epochs" if args.command == "train_teacher" else "training.epochs"),
     ):
         value = getattr(args, name)
         if value is not None:

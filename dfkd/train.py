@@ -16,6 +16,7 @@ from dfkd.config import validate
 from dfkd.data import normalize, real_dataset, test_loader
 from dfkd.distill import kl, objective
 from dfkd.models import build_model, freeze, parameter_count
+from dfkd.metrics import ClassificationMetrics
 from dfkd.schedule import Schedule
 from dfkd.synthetic import SyntheticDataset
 
@@ -35,22 +36,18 @@ def get_device(config):
 @torch.inference_mode()
 def evaluate(model, loader, dataset, device, teacher=None, temperature=1.0):
     model.eval()
-    correct = total = 0
+    metrics = ClassificationMetrics(dataset["num_classes"], device)
     loss = 0.0
     for images, labels in loader:
         x = normalize(images.to(device), dataset)
         labels = labels.to(device)
         logits = model(x)
-        correct += (logits.argmax(1) == labels).sum().item()
-        total += len(labels)
+        metrics.update(logits, labels)
         if teacher is not None:
             loss += kl(logits, teacher(x), temperature).item() * len(labels)
-    if not total:
-        raise ValueError("Evaluation set is empty")
-    return {
-        "accuracy": 100 * correct / total,
-        "distillation_loss": loss / total if teacher is not None else None,
-    }
+    result = metrics.compute()
+    result["distillation_loss"] = loss / result["samples"] if teacher is not None else None
+    return result
 
 
 def make_optimizer(model, config):
@@ -62,7 +59,7 @@ def make_optimizer(model, config):
 
 
 def make_run(config):
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     run = Path(config["experiment"]["output_dir"]) / f"{config['experiment']['name']}_{stamp}"
     run.mkdir(parents=True)
     (run / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
@@ -70,43 +67,10 @@ def make_run(config):
 
 
 def train_teacher(config):
-    """The only entrypoint permitted to load real training images and labels."""
-    c = validate(copy.deepcopy(config))
-    seed_all(c["experiment"]["seed"])
-    device = get_device(c)
-    prep = c["teacher_training"]
-    model = build_model(c["teacher"], c["dataset"]).to(device)
-    optimizer = make_optimizer(model, prep["optimizer"])
-    scheduler = Schedule(
-        optimizer,
-        prep["scheduler"],
-        dict(epochs=prep["epochs"], batch_size_schedule=[prep["batch_size"]]),
-    )
-    loader = DataLoader(
-        real_dataset(c, "train", purpose="teacher_training"),
-        batch_size=prep["batch_size"],
-        shuffle=True,
-    )
-    testing = test_loader(c)
-    output = Path(c["teacher"]["checkpoint"])
-    for epoch in range(prep["epochs"]):
-        scheduler.step(epoch)
-        model.train()
-        total = seen = 0
-        for x, y in loader:
-            optimizer.zero_grad(set_to_none=True)
-            loss = torch.nn.functional.cross_entropy(
-                model(normalize(x.to(device), c["dataset"])), y.to(device)
-            )
-            loss.backward()
-            optimizer.step()
-            total += loss.item() * len(y)
-            seen += len(y)
-        accuracy = evaluate(model, testing, c["dataset"], device)["accuracy"]
-        output.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(model.state_dict(), output)
-        print(f"teacher epoch={epoch + 1} loss={total / seen:.4f} test_accuracy={accuracy:.2f}")
-    return output
+    """Train/tune the teacher on a held-out portion of the training split."""
+    from dfkd.teacher import train_teacher as run_teacher
+
+    return run_teacher(config)
 
 
 def load_teacher(config, device):
