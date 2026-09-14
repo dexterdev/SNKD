@@ -141,7 +141,7 @@ class TrainingView(Dataset):
         return self.transform(image), label
 
 
-def _train_trial(c, prep, train_data, validation_data, device, directory, trial):
+def _train_trial(c, prep, train_data, validation_data, testing_loader, device, directory, trial):
     # Identical initialization and initial shuffle seed for fair comparisons.
     seed = c["experiment"]["seed"]
     seed_all(seed)
@@ -194,6 +194,9 @@ def _train_trial(c, prep, train_data, validation_data, device, directory, trial)
                 best_loss, best_epoch = measured["loss"], epoch
                 best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             stopped = stopping.step(measured["loss"], epoch)
+            # Reporting only: preserve training RNG state during test evaluation.
+            with torch.random.fork_rng(devices=[device] if device.type == "cuda" else []):
+                tested = evaluate(model, testing_loader, c["dataset"], device)
             row = {
                 "trial": trial, "epoch": epoch, "batch_size": prep["batch_size"],
                 "lr": optimizer.param_groups[0]["lr"],
@@ -207,7 +210,7 @@ def _train_trial(c, prep, train_data, validation_data, device, directory, trial)
                 "best_epoch": best_epoch, "best_val_loss": best_loss,
                 "early_stopping_bad_epochs": stopping.bad_epochs, "early_stopped": stopped,
             }
-            for prefix, values in (("train", training), ("val", measured)):
+            for prefix, values in (("train", training), ("val", measured), ("test", tested)):
                 row.update({f"{prefix}_{key}": value for key, value in values.items()
                             if key != "distillation_loss"})
             scalars = {key: value for key, value in row.items() if not isinstance(value, list)}
@@ -221,7 +224,8 @@ def _train_trial(c, prep, train_data, validation_data, device, directory, trial)
             print(
                 f"Trial {trial} | Epoch {epoch}/{prep['epochs']} | "
                 f"train_loss={training['loss']:.4f} train_acc={training['accuracy']:.2f}% | "
-                f"val_loss={measured['loss']:.4f} val_acc={measured['accuracy']:.2f}%",
+                f"val_loss={measured['loss']:.4f} val_acc={measured['accuracy']:.2f}% | "
+                f"test_loss={tested['loss']:.4f} test_acc={tested['accuracy']:.2f}%",
                 flush=True,
             )
             if stopped:
@@ -233,7 +237,7 @@ def _train_trial(c, prep, train_data, validation_data, device, directory, trial)
 
 
 def train_teacher(config):
-    """Export the validation-NLL winner; access the test set only after selection."""
+    """Export the validation-NLL winner; test metrics are reporting-only."""
     c = validate(copy.deepcopy(config))
     prep = c["teacher_training"]
     seed = c["experiment"]["seed"]
@@ -251,10 +255,11 @@ def train_teacher(config):
     torch.save({"train": train_indices, "validation": validation_indices}, run / "split.pt")
     train_data = TrainingView(Subset(data, train_indices), c)
     validation_data = Subset(data, validation_indices)
+    testing_loader = test_loader(c)
     summaries, winner = [], None
     for number, trial in enumerate(trials, 1):
         summary, state = _train_trial(
-            c, trial, train_data, validation_data, device, run / f"trial_{number:03d}", number
+            c, trial, train_data, validation_data, testing_loader, device, run / f"trial_{number:03d}", number
         )
         summaries.append(summary)
         if winner is None or summary["best_val_loss"] < winner["best_val_loss"]:
@@ -264,8 +269,8 @@ def train_teacher(config):
         (run / "trials.json").write_text(json.dumps(summaries, indent=2, allow_nan=False))
     model = build_model(c["teacher"], c["dataset"]).to(device)
     model.load_state_dict(torch.load(run / "best.pt", map_location="cpu", weights_only=True))
-    # No test-set reads or scores have influenced the search or early stopping.
-    testing = evaluate(model, test_loader(c), c["dataset"], device)
+    # Re-evaluate the validation-selected checkpoint for the final report.
+    testing = evaluate(model, testing_loader, c["dataset"], device)
     output = Path(c["teacher"]["checkpoint"])
     output.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(run / "best.pt", output)
@@ -282,7 +287,7 @@ def train_teacher(config):
     )
     (run / "results.json").write_text(json.dumps(results, indent=2, allow_nan=False))
     print(
-        f"Test | loss={testing['loss']:.4f} accuracy={testing['accuracy']:.2f}%",
+        f"Selected teacher test | loss={testing['loss']:.4f} accuracy={testing['accuracy']:.2f}%",
         flush=True,
     )
     return output
