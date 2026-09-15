@@ -64,6 +64,7 @@ def test_vit_teacher_and_student_pipeline(tmp_path, monkeypatch):
                                   mlp_dim=32, dropout=0, emb_dropout=0)
     c["teacher_training"].update(epochs=1, batch_size=4, augmentation={"enabled": False})
     c["training"].update(epochs=1, batch_size_schedule=[4], device="cpu")
+    c["training"]["runtime"]["num_workers"] = 0
     c["synthetic_data"]["num_samples"] = 8
     c["augmentation"]["enabled"] = False
     c["evaluation"]["batch_size"] = 4

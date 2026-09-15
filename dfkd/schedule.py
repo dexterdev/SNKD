@@ -1,12 +1,8 @@
-"""Joint batch-size and learning-rate scheduling for student distillation.
+"""Batch size and LR scheduling shared by teacher and student training.
 
-Training is split into contiguous phases, one per entry of
-`training.batch_size_schedule`; earlier phases absorb the remainder epochs. The
-batch size steps up at each phase boundary while the learning rate follows its
-own curve. With `scheduler.phase_resets: true` the LR curve restarts inside every
-phase, so each batch-size regime gets a full decay (a warm restart) instead of
-one global decay in which the later, larger-batch phases only ever see a
-near-zero learning rate.
+Student defaults use fixed 50-epoch phases from the reference notebook. With
+phase_epochs omitted/None, divide the epoch budget evenly (teacher/legacy mode).
+Cosine endpoints are inclusive, and the LR restarts at each phase boundary.
 """
 
 import math
@@ -40,8 +36,15 @@ def warmup_cosine(t, n, config):
     return cosine(t - warmup, max(1, n - warmup), config)
 
 
-def phase_at(epoch, epochs, sizes):
+def phase_at(epoch, epochs, sizes, phase_epochs=None):
     """Return (phase index, phase start epoch, phase length, batch size)."""
+    if not 0 <= epoch < epochs:
+        raise ValueError(f"Epoch {epoch} lies outside the configured {epochs}-epoch schedule")
+    if phase_epochs is not None:
+        phase = min(epoch // phase_epochs, len(sizes) - 1)
+        start = phase * phase_epochs
+        # The final BS persists if training is extended; cosine restarts every phase_epochs.
+        return phase, start, phase_epochs, sizes[phase]
     quotient, remainder = divmod(epochs, len(sizes))
     start = 0
     for i, batch_size in enumerate(sizes):
@@ -60,14 +63,15 @@ class Schedule:
         self.config = config
         self.epochs = training["epochs"]
         self.sizes = training["batch_size_schedule"]
+        self.phase_epochs = training.get("phase_epochs")
         self.base_lrs = [group["lr"] for group in optimizer.param_groups]
         CURVES.resolve(config["name"])
 
     def step(self, epoch):
         """Set the LR for `epoch` and return that epoch's (phase, batch size)."""
-        phase, start, length, batch_size = phase_at(epoch, self.epochs, self.sizes)
+        phase, start, length, batch_size = phase_at(epoch, self.epochs, self.sizes, self.phase_epochs)
         if self.config.get("phase_resets", False):
-            t, n = epoch - start, length
+            t, n = (epoch - start) % length, length
         else:
             t, n = epoch, self.epochs
         factor = CURVES.resolve(self.config["name"])(t, n, self.config)

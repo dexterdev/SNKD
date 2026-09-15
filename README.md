@@ -1,8 +1,7 @@
 # SNKD
 
 Data-free knowledge distillation from random synthetic images. A frozen teacher
-provides soft labels for an augmented mixture of uniform, Gaussian, gradient,
-Perlin, Gabor and checkerboard priors. The student never trains on real images.
+provides soft labels for augmented random noise from nine synthetic priors. The student never trains on real images.
 
 ## Install
 
@@ -38,7 +37,7 @@ CONFIG=configs/cifar10_vit.yaml
 dfkd inspect --config "$CONFIG"
 dfkd train_teacher --config "$CONFIG"
 dfkd distill --config "$CONFIG"
-dfkd evaluate --config "$CONFIG" --checkpoint runs/<student-run>/best.pt
+dfkd evaluate --config "$CONFIG" --checkpoint "runs/<student-run>/best.pt"
 ```
 
 Replace `runs/<student-run>/best.pt` with the actual student checkpoint path.
@@ -61,14 +60,71 @@ dfkd distill --config "$CONFIG" --temperature 4 --set optimizer.lr=0.01
   starts counting at epoch 60). Set `teacher_training.early_stopping.patience=0`
   to disable stopping. Train/validation/test loss and accuracy print each epoch;
   test metrics are reporting-only.
-- **Student:** 200 epochs on 200,000 synthetic samples by default. Batch sizes
-  progress through `[16, 32, 64, 128, 256, 512, 1024, 2048]`, with cosine LR
-  restarting in each phase. Change `training.batch_size_schedule` or
-  `scheduler.phase_resets` as needed. Augmentation defaults to crop/flip plus
-  3 of 17 random operations; MNIST disables horizontal flips.
+- **Student:** all model pairs use the augmented-noise notebook protocol below.
+  Defaults are shared through `configs/base.yaml`; no architecture-specific loops.
 
 `--epochs` controls the selected training command. Architecture options are under
 `teacher.kwargs` and `student.kwargs`; supplied hyperparameters are starting defaults.
+
+## Student algorithm and LR/BS schedule
+
+The active code in `distillation_through_augmented_noise_CIFAR100_optimizedA100(3).ipynb`
+is the protocol reference (commented-out experiments are excluded).
+
+1. Build a fixed bank of **150,000** images: 1,500 groups of 100, choosing one of
+   nine equally weighted families per group: gradient, Perlin, uniform, Gabor,
+   checkerboard, pink noise, rectangular patch, closed curve, or random circles.
+2. On every access, apply reflect-padded crop + horizontal flip, then **8 of 17**
+   random operations without replacement, clamping after each operation.
+   Teacher and student receive the **same freshly augmented, normalized view**.
+3. Freeze the teacher and train the student with
+   `T² × KL(softmax(teacher/T) || softmax(student/T))`, **T = 20**.
+   Use SGD: LR **0.01**, momentum **0.9**, weight decay **0.0005**; shuffle each
+   epoch and drop incomplete batches. Evaluate the student each epoch.
+
+The 200-epoch schedule uses four fixed 50-epoch phases:
+
+| Epochs (1-based) | Batch size | LR within phase |
+| --- | ---: | --- |
+| 1–50 | 16 | 0.01 → 0.0000001, cosine |
+| 51–100 | 64 | 0.01 → 0.0000001, cosine |
+| 101–150 | 256 | 0.01 → 0.0000001, cosine |
+| 151–200 | 1024 | 0.01 → 0.0000001, cosine |
+
+```mermaid
+flowchart TD
+    E["Epoch e = 0…199"] --> P["Phase p = floor(e / 50)"]
+    P --> B["BS = 16 × 4^p"]
+    P --> L["t = e mod 50; restart cosine at t = 0"]
+    B --> S["Shuffle and train with current BS and LR"]
+    L --> S
+    S --> V["Evaluate student; save metrics"]
+    V --> D{"More epochs?"}
+    D -->|Yes| N["e = e + 1"]
+    N --> E
+    D -->|No| F["Save final student"]
+```
+
+For `t = 0…49`, `LR = 1e-7 + (0.01 - 1e-7) × (1 + cos(πt/49))/2`.
+LR is set **before** training each epoch; optimizer momentum persists across phases.
+`training.phase_epochs=50` fixes phase lengths: shorter runs truncate the schedule.
+Beyond 200 epochs, the final batch size persists and cosine restarts every 50 epochs.
+Set `training.phase_epochs=null` to divide a custom epoch budget evenly across batch sizes.
+
+CUDA runtime defaults use channels-last, TF32, fused SGD when available, and bf16
+(or fp16 with gradient scaling); CPU uses fp32. Worker augmentation uses pinned
+CUDA transfers and persistent loaders, rebuilt only when BS changes.
+Set `training.runtime.num_workers=0` for debugging or `training.runtime.precision=fp32`
+to disable autocast. The float32 CIFAR bank needs about **1.72 GiB RAM**;
+`synthetic_data.materialize=false` regenerates the same indexed images to save RAM.
+
+Adaptations: priors support the dataset's image size/channel count, MNIST disables
+flips, and grayscale jitter omits hue/saturation. Seeds reproduce the corpus but
+not the notebook's exact random sequence. Geometry and random-operation switches
+are independent (correcting the notebook's indentation). KL is computed in fp32
+for numerical stability. Console output stays concise; CSV records LR, BS, KD
+loss, test loss/accuracy, teacher agreement and query counts. KD loss is sample-weighted;
+the notebook's unweighted batch mean is equivalent with the default drop-last batches.
 
 ## Outputs
 

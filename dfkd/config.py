@@ -60,10 +60,18 @@ def validate(c):
     schedule = t["batch_size_schedule"]
     if not schedule or min(schedule) < 1:
         raise ValueError("training.batch_size_schedule needs at least one positive batch size")
-    if t["epochs"] < len(schedule):
+    phase_epochs = t.get("phase_epochs")
+    if phase_epochs is not None and (not isinstance(phase_epochs, int) or phase_epochs < 1):
+        raise ValueError("training.phase_epochs must be a positive integer")
+    if t["epochs"] < 1:
+        raise ValueError("training.epochs must be positive")
+    if phase_epochs is None and t["epochs"] < len(schedule):
         raise ValueError("training.epochs must give every batch-size phase at least one epoch")
     samples = c["synthetic_data"]["num_samples"]
-    if any(min(samples, b) < 2 or samples % b == 1 for b in schedule):
+    active = schedule if phase_epochs is None else schedule[:(t["epochs"] - 1) // phase_epochs + 1]
+    if t.get("drop_last", True) and any(samples < b for b in active):
+        raise ValueError("drop_last would produce zero batches; reduce batch size or increase num_samples")
+    if any(min(samples, b) < 2 or (not t.get("drop_last", True) and samples % b == 1) for b in active):
         # A singleton final minibatch makes BatchNorm fail in training mode.
         raise ValueError(
             "batch_size_schedule leaves a single-sample final minibatch; "
@@ -73,6 +81,17 @@ def validate(c):
         CURVES.resolve(spec["name"])
         if not 0 <= spec.get("min_lr_ratio", 0) <= 1:
             raise ValueError("scheduler.min_lr_ratio must be in [0, 1]")
+    runtime = t.get("runtime", {})
+    if runtime.get("precision", "auto") not in ("auto", "fp32", "bf16", "fp16"):
+        raise ValueError("training.runtime.precision must be auto, fp32, bf16 or fp16")
+    workers = runtime.get("num_workers", "auto")
+    if workers != "auto" and (not isinstance(workers, int) or workers < 0):
+        raise ValueError("training.runtime.num_workers must be auto or a nonnegative integer")
+    prefetch = runtime.get("prefetch_factor")
+    if prefetch is not None and (not isinstance(prefetch, int) or prefetch < 1):
+        raise ValueError("prefetch_factor must be a positive integer")
+    if c["evaluation"]["every"] < 1:
+        raise ValueError("evaluation.every must be positive")
     Augment(c["augmentation"], d)
     SyntheticDataset(c)
     return c

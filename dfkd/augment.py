@@ -19,15 +19,11 @@ from dfkd.registry import Registry
 OPERATIONS = Registry()
 OPERATIONS.update(
     rotation=T.RandomRotation,
-    affine=T.RandomAffine,
     perspective=T.RandomPerspective,
     random_resized_crop=T.RandomResizedCrop,
     color_jitter=T.ColorJitter,
     grayscale=T.RandomGrayscale,
-    gaussian_blur=T.GaussianBlur,
-    sharpness=T.RandomAdjustSharpness,
     autocontrast=T.RandomAutocontrast,
-    solarization=T.RandomSolarize,
     inversion=T.RandomInvert,
 )
 
@@ -37,66 +33,82 @@ def histogram_equalization(p=1.0):
     def apply(x):
         if torch.rand(()) >= p:
             return x
-        return F.equalize((x * 255).round().to(torch.uint8)).float() / 255
+        return F.equalize((x.clamp(0, 1) * 255).to(torch.uint8)).float() / 255
 
     return apply
 
 
-@OPERATIONS.register("posterization")
-def posterization(bits=4, p=1.0):
-    def apply(x):
-        if torch.rand(()) >= p:
-            return x
-        return F.posterize((x * 255).round().to(torch.uint8), bits).float() / 255
+def _sample(value):
+    if isinstance(value, (list, tuple)):
+        return torch.empty(()).uniform_(*value).item()
+    return value
 
+
+@OPERATIONS.register("posterization")
+def posterization(bits=(3, 4, 5, 6), p=1.0):
+    def apply(x):
+        if p < 1 and torch.rand(()) >= p:
+            return x
+        chosen = bits[torch.randint(len(bits), ()).item()] if isinstance(bits, (list, tuple)) else bits
+        return F.posterize((x.clamp(0, 1) * 255).to(torch.uint8), chosen).float() / 255
     return apply
 
 
 @OPERATIONS.register("gaussian_noise")
-def gaussian_noise(std=0.05, mean=0.0):
-    if std < 0:
-        raise ValueError("Noise std must be nonnegative")
-    return lambda x: (x + torch.randn_like(x) * std + mean).clamp(0, 1)
+def gaussian_noise(std=(0.01, 0.08), mean=0.0):
+    return lambda x: (x + torch.randn_like(x) * _sample(std) + mean).clamp(0, 1)
 
 
 @OPERATIONS.register("salt_and_pepper_noise")
-def salt_and_pepper_noise(probability=0.03):
-    if not 0 <= probability <= 1:
-        raise ValueError("Noise probability must be in [0, 1]")
-
+def salt_and_pepper_noise(probability=(0.01, 0.06)):
     def apply(x):
-        mask = torch.rand_like(x)
-        return torch.where(
-            mask < probability / 2, 0.0, torch.where(mask > 1 - probability / 2, 1.0, x)
-        )
-
-    return apply
-
-
-def _erase(fraction, fill):
-    if not 0 < fraction <= 1:
-        raise ValueError("Erasing fraction must be in (0, 1]")
-
-    def apply(x):
-        c, h, w = x.shape
-        rh, rw = max(1, int(h * fraction)), max(1, int(w * fraction))
-        y = torch.randint(h - rh + 1, ()).item()
-        z = torch.randint(w - rw + 1, ()).item()
-        x = x.clone()
-        x[:, y : y + rh, z : z + rw] = torch.rand(c, 1, 1) if fill is None else fill
-        return x
-
+        prob = _sample(probability)
+        mask = torch.rand(1, *x.shape[-2:])
+        return torch.where(mask < prob / 2, 1.0, torch.where(mask > 1 - prob / 2, 0.0, x))
     return apply
 
 
 @OPERATIONS.register("cutout")
-def cutout(fraction=0.25, fill=0.0):
-    return _erase(fraction, fill)
+def cutout(scale=(0.02, 0.25), ratio=(0.3, 3.3), fill=0.0):
+    return T.RandomErasing(p=1.0, scale=scale, ratio=ratio, value=fill)
 
 
 @OPERATIONS.register("random_color_region_erasing")
-def random_color_region_erasing(fraction=0.25):
-    return _erase(fraction, None)
+def random_color_region_erasing(min_size=4, max_size=12):
+    def apply(x):
+        c, h, w = x.shape
+        rh = torch.randint(min(min_size, h), min(max_size, h) + 1, ()).item()
+        rw = torch.randint(min(min_size, w), min(max_size, w) + 1, ()).item()
+        y = torch.randint(h - rh + 1, ()).item()
+        z = torch.randint(w - rw + 1, ()).item()
+        out = x.clone()
+        out[:, y:y + rh, z:z + rw] = torch.rand(c, 1, 1)
+        return out
+    return apply
+
+
+def gaussian_blur(kernel_sizes=(3, 5), sigma=(0.1, 2.2)):
+    return lambda x: F.gaussian_blur(x, kernel_sizes[torch.randint(len(kernel_sizes), ()).item()], _sample(sigma))
+
+
+def sharpness(sharpness_factor=(0.0, 3.5)):
+    return lambda x: F.adjust_sharpness(x, _sample(sharpness_factor))
+
+
+def solarization(threshold=(0.3, 0.9)):
+    return lambda x: F.solarize(x, _sample(threshold))
+
+
+def affine(degrees=12, translate_pixels=2, scale=(0.82, 1.18), shear=12):
+    return lambda x: F.affine(
+        x, _sample((-degrees, degrees)),
+        torch.randint(-translate_pixels, translate_pixels + 1, (2,)).tolist(),
+        _sample(scale), _sample((-shear, shear)),
+    )
+
+
+OPERATIONS.update(gaussian_blur=gaussian_blur, sharpness=sharpness,
+                  solarization=solarization, affine=affine)
 
 
 class Augment:
@@ -112,8 +124,8 @@ class Augment:
         crop = dict(geometric.get("crop", {}))
         if crop.get("padding_mode") == "reflect" and crop.get("padding", 0) >= size:
             raise ValueError("Reflect padding must be smaller than image_size")
-        self.geometric = [T.RandomCrop(size, **crop)]
-        if geometric.get("horizontal_flip", False):
+        self.geometric = [T.RandomCrop(size, **crop)] if geometric.get("enabled", True) else []
+        if geometric.get("enabled", True) and geometric.get("horizontal_flip", False):
             self.geometric.append(T.RandomHorizontalFlip(p=0.5))
 
         self.operations = []
@@ -121,8 +133,8 @@ class Augment:
         for name, params in config["operations"].items():
             params = dict(params or {})
             if channels == 1 and name == "color_jitter":
-                if params.get("saturation", 0) or params.get("hue", 0):
-                    raise ValueError("Grayscale color_jitter: disable hue and saturation")
+                params.pop("saturation", None)
+                params.pop("hue", None)
             if name == "random_resized_crop":
                 params["size"] = size
             self.operations.append(OPERATIONS.resolve(name)(**params))
@@ -147,7 +159,7 @@ class Augment:
                 else torch.randint(len(self.operations), (self.k,))
             )
             for i in indices.tolist():
-                x = self.operations[i](x)
+                x = self.operations[i](x).clamp(0, 1)
         return x.clamp(0, 1)
 
     def batch(self, x):

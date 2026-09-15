@@ -9,16 +9,15 @@ from pathlib import Path
 
 import torch
 import yaml
-from torch.utils.data import DataLoader
 
-from dfkd.augment import Augment
 from dfkd.config import validate
 from dfkd.data import normalize, real_dataset, test_loader
 from dfkd.distill import kl, objective
 from dfkd.models import build_model, freeze, parameter_count
 from dfkd.metrics import ClassificationMetrics
 from dfkd.schedule import Schedule
-from dfkd.synthetic import SyntheticDataset
+from dfkd.synthetic import AugmentedSyntheticDataset
+from dfkd.runtime import StudentRuntime
 
 
 def seed_all(seed):
@@ -67,7 +66,7 @@ def make_run(config):
 
 
 def train_teacher(config):
-    """Train/tune the teacher on a held-out portion of the training split."""
+    """Train the teacher on a held-out portion of the training split."""
     from dfkd.teacher import train_teacher as run_teacher
 
     return run_teacher(config)
@@ -88,12 +87,12 @@ def train_student(config, *, evaluation_loader=None):
     d, t = c["dataset"], c["training"]
     seed_all(c["experiment"]["seed"])
     device = get_device(c)
-    teacher = load_teacher(c, device)
-    student = build_model(c["student"], d).to(device)
-    optimizer = make_optimizer(student, c["optimizer"])
+    runtime = StudentRuntime(device, t.get("runtime", {}))
+    teacher = runtime.prepare(load_teacher(c, device))
+    student = runtime.prepare(build_model(c["student"], d).to(device))
+    optimizer = make_optimizer(student, runtime.optimizer_options(c["optimizer"]))
     scheduler = Schedule(optimizer, c["scheduler"], t)
-    data = SyntheticDataset(c)
-    augment = Augment(c["augmentation"], d)
+    data = AugmentedSyntheticDataset(c)
     evaluator = evaluation_loader if evaluation_loader is not None else test_loader(c)
     run = make_run(c)
     teacher_accuracy = evaluate(teacher, evaluator, d, device)["accuracy"]
@@ -102,54 +101,67 @@ def train_student(config, *, evaluation_loader=None):
         f"student {c['student']['architecture']} {parameter_count(student):,} params | "
         f"compression {parameter_count(teacher) / parameter_count(student):.2f}x"
     )
-    history = []
     queries = 0
     best = -1.0
-    for epoch in range(t["epochs"]):
-        phase, batch_size = scheduler.step(epoch)
-        loader = DataLoader(data, batch_size=batch_size, shuffle=True)
-        student.train()
-        total = seen = 0
-        for batch in loader:
-            x = normalize(augment.batch(batch["image"]).to(device), d)
-            with torch.no_grad():
-                logits = teacher(x)
-            queries += len(x)
-            optimizer.zero_grad(set_to_none=True)
-            loss = objective(student(x), logits, c["distillation"])
-            if not torch.isfinite(loss):
-                raise FloatingPointError("Non-finite loss; inspect the learning rate/temperature")
-            loss.backward()
-            optimizer.step()
-            total += loss.item() * len(x)
-            seen += len(x)
-        measured = (epoch + 1) % c["evaluation"]["every"] == 0 or epoch + 1 == t["epochs"]
-        accuracy = (
-            evaluate(student, evaluator, d, device)["accuracy"] if measured else None
-        )
-        if accuracy is not None and accuracy > best:
-            best = accuracy
-            torch.save(student.state_dict(), run / "best.pt")
-        history.append(
-            dict(
-                epoch=epoch + 1,
-                phase=phase,
-                batch_size=batch_size,
-                lr=optimizer.param_groups[0]["lr"],
-                train_loss=total / seen,
-                student_accuracy=accuracy,
-            )
-        )
-        print(json.dumps(history[-1]))
+    final = None
+    loader = None
+    previous_batch_size = None
+    with (run / "metrics.csv").open("w", newline="") as metrics_file:
+        writer = None
+        for epoch in range(t["epochs"]):
+            phase, batch_size = scheduler.step(epoch)
+            if batch_size != previous_batch_size:
+                # Keep one persistent worker pool per phase, not one pool per past BS.
+                del loader
+                loader = runtime.loader(data, batch_size, t.get("drop_last", True),
+                                        c["experiment"]["seed"] + phase)
+                previous_batch_size = batch_size
+            student.train()
+            teacher.eval()
+            total = seen = agreement = 0
+            for images in loader:
+                x = normalize(runtime.input(images), d)
+                with torch.no_grad(), runtime.autocast():
+                    logits = teacher(x)
+                queries += len(x)
+                optimizer.zero_grad(set_to_none=True)
+                with runtime.autocast():
+                    student_logits = student(x)
+                    loss = objective(student_logits, logits, c["distillation"])
+                if not torch.isfinite(loss):
+                    raise FloatingPointError("Non-finite loss; inspect the learning rate/temperature")
+                runtime.backward_step(loss, optimizer)
+                total += loss.item() * len(x)
+                seen += len(x)
+                agreement += student_logits.argmax(1).eq(logits.argmax(1)).sum().item()
+            if not seen:
+                raise ValueError("Student loader yielded no batches; reduce batch size")
+            measured = (epoch + 1) % c["evaluation"]["every"] == 0 or epoch + 1 == t["epochs"]
+            # Evaluation must not consume augmentation RNG state in the main process.
+            with torch.random.fork_rng(devices=[device] if device.type == "cuda" else []):
+                testing = evaluate(student, evaluator, d, device) if measured else None
+            accuracy = testing["accuracy"] if testing else None
+            if accuracy is not None:
+                final = accuracy
+                if accuracy > best:
+                    best = accuracy
+                    torch.save(student.state_dict(), run / "best.pt")
+            train_loss = total / seen
+            row = dict(epoch=epoch + 1, phase=phase, batch_size=batch_size,
+                       lr=optimizer.param_groups[0]["lr"], train_loss=train_loss,
+                       train_samples=seen, teacher_queries=queries,
+                       teacher_agreement=100 * agreement / seen,
+                       student_accuracy=accuracy, test_loss=testing["loss"] if testing else None)
+            if writer is None:
+                writer = csv.DictWriter(metrics_file, fieldnames=list(row))
+                writer.writeheader()
+            writer.writerow(row)
+            metrics_file.flush()
+            test_text = (f"test_loss={testing['loss']:.4f} test_acc={accuracy:.2f}%"
+                         if testing else "test=not evaluated")
+            print(f"Epoch {epoch + 1}/{t['epochs']} | kd_loss={train_loss:.4f} | {test_text}", flush=True)
+    del loader
     torch.save(student.state_dict(), run / "last.pt")
-    with (run / "metrics.csv").open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(history[0]))
-        writer.writeheader()
-        writer.writerows(history)
-    final = next(
-        (r["student_accuracy"] for r in reversed(history) if r["student_accuracy"] is not None),
-        None,
-    )
     retention = (
         100 * final / teacher_accuracy if final is not None and teacher_accuracy else None
     )
@@ -165,9 +177,11 @@ def train_student(config, *, evaluation_loader=None):
         final_student_accuracy=final,
         accuracy_retention_percent=retention,
         teacher_queries=queries,
-        final_train_loss=history[-1]["train_loss"],
+        final_train_loss=train_loss,
         batch_size_schedule=t["batch_size_schedule"],
         lr_schedule=c["scheduler"],
+        phase_epochs=t.get("phase_epochs"),
+        precision=str(runtime.dtype or torch.float32),
     )
     (run / "results.json").write_text(json.dumps(results, indent=2))
     return run

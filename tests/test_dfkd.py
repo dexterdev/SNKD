@@ -24,7 +24,9 @@ def config(tmp_path):
     c["experiment"]["output_dir"] = str(tmp_path / "runs")
     c["teacher"]["checkpoint"] = str(tmp_path / "teacher.pt")
     c["synthetic_data"]["num_samples"] = 8
-    c["training"].update(epochs=2, batch_size_schedule=[4], device="cpu")
+    c["training"].update(epochs=2, batch_size_schedule=[4], phase_epochs=None, device="cpu")
+    c["training"]["runtime"]["num_workers"] = 0
+    c["synthetic_data"]["group_size"] = 1
     c["evaluation"]["batch_size"] = 4
     c["augmentation"]["num_random_ops"] = 2
     return validate(c)
@@ -205,6 +207,7 @@ def test_lr_decays_once_across_training_without_phase_resets():
 
 
 def test_singleton_final_minibatch_is_rejected(config):
+    config["training"]["drop_last"] = False
     config["synthetic_data"]["num_samples"] = 9
     config["training"]["batch_size_schedule"] = [4]
     with pytest.raises(ValueError, match="single-sample"):
