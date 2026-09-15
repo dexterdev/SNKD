@@ -17,7 +17,7 @@ from dfkd.schedule import Schedule
 from dfkd.synthetic import AugmentedSyntheticDataset, SyntheticDataset
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIGS = ["mnist", "fashionmnist", "cifar10", "cifar100", "cifar10_vit", "cifar100_vit"]
+CONFIGS = ["mnist", "fashionmnist", "cifar10", "cifar100", "cifar10_vit", "cifar100_vit", "cifar10_alexnet"]
 
 
 @pytest.mark.parametrize("name", CONFIGS)

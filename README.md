@@ -19,6 +19,7 @@ pip install -e '.[dev]'
 | --- | --- | --- |
 | MNIST | LeNet-5 → LeNet-5/2 | `configs/mnist.yaml` |
 | Fashion-MNIST | LeNet-5 → LeNet-5/2 | `configs/fashionmnist.yaml` |
+| CIFAR-10 | AlexNet → AlexNetHalf | `configs/cifar10_alexnet.yaml` |
 | CIFAR-10 | ResNet-34 → ResNet-18 | `configs/cifar10.yaml` |
 | CIFAR-100 | ResNet-34 → ResNet-18 | `configs/cifar100.yaml` |
 | CIFAR-10 | ViT-8 → ViT-4 | `configs/cifar10_vit.yaml` |
@@ -27,6 +28,12 @@ pip install -e '.[dev]'
 ViT uses the [pinned small-dataset architecture](https://github.com/lucidrains/vit-pytorch/blob/e1b08c15b9b237329d30324ce40579d4d4afc761/vit_pytorch/vit_for_small_dataset.py)
 with SPT and LSA. Teacher/student depths are 8/4; both default to patch size 4,
 dimension 256, 4 heads, MLP dimension 1024 and dropout 0.1.
+
+AlexNet follows [Table 2 of the ZSKD supplement](https://proceedings.mlr.press/v97/nayak19a/nayak19a-supp.pdf):
+five convolutions, two hidden FC layers, LRN, seven BatchNorm layers and dropout 0.5.
+BatchNorm settings are unspecified there; this implementation uses PyTorch defaults
+with learnable scale/bias. Total trainable parameters: **1,659,178 → 417,434**,
+including BatchNorm. This config uses the shared SNKD training settings below.
 
 ## Run
 

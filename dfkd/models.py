@@ -82,6 +82,20 @@ def vit4(**kwargs):
     return _vit(4, **kwargs)
 
 
+@MODELS.register("alexnet")
+def alexnet(**kwargs):
+    from dfkd.alexnet import AlexNetCIFAR
+
+    return AlexNetCIFAR(**kwargs)
+
+
+@MODELS.register("alexnet_half")
+def alexnet_half(**kwargs):
+    from dfkd.alexnet import AlexNetCIFAR
+
+    return AlexNetCIFAR(half=True, **kwargs)
+
+
 def parameter_count(model):
     return sum(p.numel() for p in model.parameters())
 

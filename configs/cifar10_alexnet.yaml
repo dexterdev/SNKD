@@ -1,0 +1,8 @@
+extends: cifar10.yaml
+experiment:
+  name: alexnet_alexnet_half_cifar10
+teacher:
+  architecture: alexnet
+  checkpoint: checkpoints/alexnet_cifar10.pt
+student:
+  architecture: alexnet_half
