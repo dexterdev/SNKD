@@ -1,193 +1,90 @@
-# DFKD from random synthetic priors
+# SNKD
 
-Data-free knowledge distillation without a generator. The student never sees a real
-training image: its inputs are drawn from parametric random priors (uniform, Gaussian,
-linear gradients, Perlin noise, Gabor patches, checkerboards), heavily augmented, and
-labelled by a frozen teacher's soft logits. Real data is used only to train the teacher
-and to measure held-out accuracy.
+Data-free knowledge distillation from random synthetic images. A frozen teacher
+provides soft labels for an augmented mixture of uniform, Gaussian, gradient,
+Perlin, Gabor and checkerboard priors. The student never trains on real images.
 
 ## Install
 
+Requires Python 3.10+ and PyTorch; CUDA is used automatically when available.
+
 ```bash
+git clone https://github.com/dexterdev/SNKD.git
+cd SNKD
 pip install -e '.[dev]'
 ```
 
-## Use
+## Model configurations
+
+| Dataset | Teacher → student | Config |
+| --- | --- | --- |
+| MNIST | LeNet-5 → LeNet-5/2 | `configs/mnist.yaml` |
+| Fashion-MNIST | LeNet-5 → LeNet-5/2 | `configs/fashionmnist.yaml` |
+| CIFAR-10 | ResNet-34 → ResNet-18 | `configs/cifar10.yaml` |
+| CIFAR-100 | ResNet-34 → ResNet-18 | `configs/cifar100.yaml` |
+| CIFAR-10 | ViT-8 → ViT-4 | `configs/cifar10_vit.yaml` |
+| CIFAR-100 | ViT-8 → ViT-4 | `configs/cifar100_vit.yaml` |
+
+ViT uses the [pinned small-dataset architecture](https://github.com/lucidrains/vit-pytorch/blob/e1b08c15b9b237329d30324ce40579d4d4afc761/vit_pytorch/vit_for_small_dataset.py)
+with SPT and LSA. Teacher/student depths are 8/4; both default to patch size 4,
+dimension 256, 4 heads, MLP dimension 1024 and dropout 0.1.
+
+## Run
+
+Choose a config from the table and use it throughout:
 
 ```bash
-dfkd inspect       --config configs/mnist.yaml          # resolved config + parameter counts
-dfkd train_teacher --config configs/mnist.yaml          # the only step that reads real train data
-dfkd distill       --config configs/mnist.yaml          # student training on synthetic data
-dfkd evaluate      --config configs/mnist.yaml --checkpoint runs/<run>/best.pt
+CONFIG=configs/cifar10_vit.yaml
+dfkd inspect --config "$CONFIG"
+dfkd train_teacher --config "$CONFIG"
+dfkd distill --config "$CONFIG"
+dfkd evaluate --config "$CONFIG" --checkpoint runs/<student-run>/best.pt
 ```
 
-Configs: `mnist.yaml` and `fashionmnist.yaml` (LeNet-5 → LeNet-5/2),
-`cifar10.yaml` and `cifar100.yaml` (ResNet-34 → ResNet-18).
+Replace `runs/<student-run>/best.pt` with the actual student checkpoint path.
+Datasets download to `data/` by default. Distillation requires the teacher
+checkpoint at `teacher.checkpoint`; teacher training writes it automatically.
 
-Override anything from the command line:
+## Training settings
+
+Defaults are in `configs/base.yaml`; dataset configs override them.
+Use `--set dotted.key=value` for overrides:
 
 ```bash
-dfkd distill --config configs/cifar10.yaml --temperature 4 --epochs 50 \
-  --set synthetic_data.priors.gabor.weight=3 --set optimizer.lr=0.05
+dfkd train_teacher --config "$CONFIG" --epochs 200 --set teacher_training.optimizer.lr=0.05
+dfkd distill --config "$CONFIG" --temperature 4 --set optimizer.lr=0.01
 ```
 
-Each distillation writes `runs/<name>_<timestamp>/` containing the resolved
-`config.yaml`, `metrics.csv`, `results.json`, and `best.pt` / `last.pt`.
+- **Teacher:** one run, up to 100 epochs by default, with a seeded 90/10
+  training/validation split. Validation loss selects the best checkpoint and
+  controls early stopping (patience 20, minimum improvement 0.0001; patience
+  starts counting at epoch 60). Set `teacher_training.early_stopping.patience=0`
+  to disable stopping. Train/validation/test loss and accuracy print each epoch;
+  test metrics are reporting-only.
+- **Student:** 200 epochs on 200,000 synthetic samples by default. Batch sizes
+  progress through `[16, 32, 64, 128, 256, 512, 1024, 2048]`, with cosine LR
+  restarting in each phase. Change `training.batch_size_schedule` or
+  `scheduler.phase_resets` as needed. Augmentation defaults to crop/flip plus
+  3 of 17 random operations; MNIST disables horizontal flips.
 
-## ViT-8 → ViT-4
+`--epochs` controls the selected training command. Architecture options are under
+`teacher.kwargs` and `student.kwargs`; supplied hyperparameters are starting defaults.
 
-`configs/cifar10_vit.yaml` and `configs/cifar100_vit.yaml` use an 8-layer teacher
-and a 4-layer student. Both use the small-dataset ViT from
-[lucidrains/vit-pytorch at the requested commit](https://github.com/lucidrains/vit-pytorch/blob/e1b08c15b9b237329d30324ce40579d4d4afc761/vit_pytorch/vit_for_small_dataset.py),
-including shifted patch tokenization (SPT), locality self-attention (LSA),
-learned attention temperature and diagonal attention masking. The source is
-vendored in `dfkd/vit_small.py` with its MIT license; only `einops` is added as
-a dependency, without installing the full upstream package.
+## Outputs
 
-The supplied configs use 32×32 images, 4×4 patches, dimension 256, 4 attention
-heads of dimension 64, MLP dimension 1024, and dropout/embedding dropout 0.1.
-These dimensions are configurable through `teacher.kwargs` and `student.kwargs`;
-the names `vit8` and `vit4` fix the transformer depths. Training settings inherit
-the existing CIFAR defaults and are not claimed to be tuned for ViT.
+Runs are saved under `runs/<name>_<timestamp>/`.
 
-```bash
-pip install -e '.[dev]'
-dfkd inspect --config configs/cifar10_vit.yaml
-dfkd train_teacher --config configs/cifar10_vit.yaml
-dfkd distill --config configs/cifar10_vit.yaml
-```
-
-Use `configs/cifar100_vit.yaml` for CIFAR-100. Teacher training remains a single
-run with validation-based checkpoint selection and early stopping, and concise
-train/validation/test metrics each epoch. Student training uses synthetic inputs
-and the frozen ViT-8 teacher's soft logits through the existing KD pipeline.
-
-## Teacher training
-
-`dfkd train_teacher` performs one training run using the configured hyperparameters,
-with at most 100 epochs by default. Set learning rate, weight decay, and label
-smoothing directly under `teacher_training`.
-
-```bash
-dfkd train_teacher --config configs/cifar10.yaml
-dfkd train_teacher --config configs/cifar10.yaml --epochs 200 \
-  --set teacher_training.optimizer.lr=0.05
-```
-
-Training uses a seeded 90/10 stratified training/validation split. Mild
-training-only augmentation uses crop padding 4 on CIFAR and horizontal flips except
-on MNIST. Set `teacher_training.augmentation.enabled=false` to disable it.
-Validation is unaugmented. Split indices are saved relative to the original training
-dataset. Seeded runs are reproducible on a fixed setup; CUDA kernels may still be
-nondeterministic.
-
-Checkpoint selection minimizes **validation cross-entropy (NLL)**.
-Early stopping uses that same metric, with patience 20 and minimum improvement
-0.0001; patience starts counting from epoch 60 to allow learning-rate decay.
-Set `teacher_training.early_stopping.patience=0` to disable stopping. Increase
-`min_epochs` when increasing the training budget or using a late LR drop.
-The raw best checkpoint is saved even for improvements smaller than `min_delta`.
-The official test set is evaluated each epoch for reporting only. Test metrics do
-not control checkpoint selection or early stopping. The selected
-checkpoint is evaluated again for the final test report.
-No full-training-set refit is performed: the exported model is the validation winner.
-
-Each teacher run writes:
-
-- `config.yaml`, `split.pt`, and `results.json`.
-- Flushed `metrics.csv` (scalars)
-  and `metrics.jsonl` (including per-class metrics and confusion matrices).
-- One `best.pt` for the best validation epoch, exported as the plain state dict at
-  `teacher.checkpoint`, compatible with student distillation. An existing export
-  is replaced after successful training; the timestamped run keeps its own copy.
-
-Console output is limited to train/validation/test loss and accuracy each epoch,
-with the epoch number. The final line reports the selected teacher's
-test loss and accuracy.
-
-Every epoch saves train/validation/test NLL, accuracy, top-5 accuracy, macro precision,
-recall and F1, weighted F1, balanced accuracy, 15-bin ECE, multiclass Brier score,
-mean confidence, sample counts, training objective, LR, batch size, timing,
-throughput, peak allocated CUDA memory, best epoch and stopping status.
-JSONL also records per-class precision/recall/F1/support and confusion matrices
-(rows are true classes, columns are predictions, in dataset class-index order).
-
-Accuracies are percentages; precision/recall/F1, confidence and ECE are fractions.
-Brier score is the unnormalized multiclass sum (range 0–2); NLL uses natural logs.
-Macro metrics include all configured classes (undefined values are zero);
-balanced accuracy averages recall over supported classes. Top-5 uses min(5, classes).
-Training metrics describe the augmented minibatches seen during optimization;
-`train_objective` includes label smoothing while `train_loss` is ordinary NLL.
-Evaluation metrics describe a fixed checkpoint on unaugmented data.
-
-Metrics stream to disk rather than retaining predictions or epoch history.
-
-## How it works
-
-| Step | Module |
+| Run | Files |
 | --- | --- |
-| Sample `i` is a pure function of `(seed, i)` — no corpus is stored | `dfkd/synthetic.py` |
-| Query augmentation supplies the diversity the priors lack | `dfkd/augment.py` |
-| Batch size and learning rate advance together | `dfkd/schedule.py` |
-| Frozen teacher labels each augmented view; student fits it | `dfkd/train.py`, `dfkd/distill.py` |
-| Real data is reachable only for teacher training and evaluation | `dfkd/data.py` |
+| Teacher | `config.yaml`, `split.pt`, `metrics.csv`, `metrics.jsonl`, `results.json`, `best.pt`; best weights also exported to `teacher.checkpoint` |
+| Student | `config.yaml`, `metrics.csv`, `results.json`, `best.pt`, `last.pt` |
 
-### Query augmentation
+Teacher files retain detailed classification, calibration and timing metrics;
+JSONL includes per-class scores and confusion matrices. Accuracy is in percent;
+precision/recall/F1 and calibration error are fractions.
 
-Each synthetic image is augmented independently, in two sequential stages:
+## Tests and license
 
-1. **Geometric (2 transforms, always applied):** `RandomCrop(padding=4, reflect)` then
-   `RandomHorizontalFlip(p=0.5)`.
-2. **RandAug-style (`n` of 17, without replacement):** `num_random_ops` operations are
-   drawn from the 17-operation pool as a combination — no operation is drawn twice —
-   and applied in the order drawn. Default `n = 3`.
+`pytest -q` runs CPU tests using artificial data, without dataset downloads.
 
-The pool: rotation, affine, perspective, random_resized_crop, color_jitter, grayscale,
-gaussian_blur, sharpness, autocontrast, histogram_equalization, posterization,
-solarization, inversion, gaussian_noise, salt_and_pepper_noise, cutout,
-random_color_region_erasing.
-
-**MNIST runs with the flip disabled** — a mirrored digit is a different digit — so it
-uses one geometric transform rather than two. Fashion-MNIST and the CIFAR configs keep
-the flip.
-
-### Batch-size and LR scheduling
-
-Student training splits its epochs into one contiguous phase per entry of
-`training.batch_size_schedule` (earlier phases absorb the remainder). The batch size
-steps up at each phase boundary while the LR follows its own curve:
-
-```yaml
-training:
-  epochs: 200
-  batch_size_schedule: [16, 32, 64, 128, 256, 512, 1024, 2048]
-scheduler:
-  name: cosine        # constant | cosine | step | warmup_cosine
-  phase_resets: true
-  min_lr_ratio: 0.0
-```
-
-With `phase_resets: true` the cosine restarts inside each phase, so all eight
-batch-size regimes train under a full decay (a warm restart) — 25 epochs at batch 16
-with LR 0.01 → 0, then 25 at batch 32 with LR 0.01 → 0, and so on. Set it to `false`
-for a single global decay across all 200 epochs, which leaves the large-batch phases
-training at a near-zero LR. `metrics.csv` records the phase and batch size per epoch.
-
-## Configuration
-
-`configs/base.yaml` holds the defaults; a dataset config `extends` it and overrides the
-dataset, architectures and teacher checkpoint path. Priors, augmentation operations,
-losses, models and datasets are registries — add an entry and reference it by name
-instead of branching in the training loop.
-
-## Tests
-
-```bash
-pytest -q
-```
-
-The suite runs on CPU in under a minute and never downloads a dataset.
-
-## License
-
-MIT, see `LICENSE`.
+MIT. The vendored ViT source retains Phil Wang's MIT license.
