@@ -62,6 +62,26 @@ def resnet34(**kwargs):
     return _resnet(34, **kwargs)
 
 
+def _vit(depth, channels, num_classes, image_size, **kwargs):
+    from dfkd.vit_small import ViT
+
+    options = dict(patch_size=4, dim=256, heads=4, dim_head=64,
+                   mlp_dim=1024, dropout=0.1, emb_dropout=0.1)
+    options.update(kwargs)
+    return ViT(image_size=image_size, channels=channels, num_classes=num_classes,
+               depth=depth, **options)
+
+
+@MODELS.register("vit8")
+def vit8(**kwargs):
+    return _vit(8, **kwargs)
+
+
+@MODELS.register("vit4")
+def vit4(**kwargs):
+    return _vit(4, **kwargs)
+
+
 def parameter_count(model):
     return sum(p.numel() for p in model.parameters())
 

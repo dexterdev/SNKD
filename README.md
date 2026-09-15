@@ -34,6 +34,34 @@ dfkd distill --config configs/cifar10.yaml --temperature 4 --epochs 50 \
 Each distillation writes `runs/<name>_<timestamp>/` containing the resolved
 `config.yaml`, `metrics.csv`, `results.json`, and `best.pt` / `last.pt`.
 
+## ViT-8 → ViT-4
+
+`configs/cifar10_vit.yaml` and `configs/cifar100_vit.yaml` use an 8-layer teacher
+and a 4-layer student. Both use the small-dataset ViT from
+[lucidrains/vit-pytorch at the requested commit](https://github.com/lucidrains/vit-pytorch/blob/e1b08c15b9b237329d30324ce40579d4d4afc761/vit_pytorch/vit_for_small_dataset.py),
+including shifted patch tokenization (SPT), locality self-attention (LSA),
+learned attention temperature and diagonal attention masking. The source is
+vendored in `dfkd/vit_small.py` with its MIT license; only `einops` is added as
+a dependency, without installing the full upstream package.
+
+The supplied configs use 32×32 images, 4×4 patches, dimension 256, 4 attention
+heads of dimension 64, MLP dimension 1024, and dropout/embedding dropout 0.1.
+These dimensions are configurable through `teacher.kwargs` and `student.kwargs`;
+the names `vit8` and `vit4` fix the transformer depths. Training settings inherit
+the existing CIFAR defaults and are not claimed to be tuned for ViT.
+
+```bash
+pip install -e '.[dev]'
+dfkd inspect --config configs/cifar10_vit.yaml
+dfkd train_teacher --config configs/cifar10_vit.yaml
+dfkd distill --config configs/cifar10_vit.yaml
+```
+
+Use `configs/cifar100_vit.yaml` for CIFAR-100. Teacher training remains a single
+run with validation-based checkpoint selection and early stopping, and concise
+train/validation/test metrics each epoch. Student training uses synthetic inputs
+and the frozen ViT-8 teacher's soft logits through the existing KD pipeline.
+
 ## Teacher training
 
 `dfkd train_teacher` performs one training run using the configured hyperparameters,

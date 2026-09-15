@@ -1,0 +1,17 @@
+extends: cifar10.yaml
+experiment:
+  name: vit8_vit4_cifar10
+teacher:
+  architecture: vit8
+  checkpoint: checkpoints/vit8_cifar10.pt
+  kwargs: &vit
+    patch_size: 4
+    dim: 256
+    heads: 4
+    dim_head: 64
+    mlp_dim: 1024
+    dropout: 0.1
+    emb_dropout: 0.1
+student:
+  architecture: vit4
+  kwargs: *vit

@@ -1,0 +1,11 @@
+extends: cifar10_vit.yaml
+experiment:
+  name: vit8_vit4_cifar100
+dataset:
+  name: cifar100
+  num_classes: 100
+  normalization:
+    mean: [0.5071, 0.4867, 0.4408]
+    std: [0.2675, 0.2565, 0.2761]
+teacher:
+  checkpoint: checkpoints/vit8_cifar100.pt
